@@ -187,7 +187,9 @@ class _PredictPageState extends State<PredictPage> {
       }
     } catch (_) {
       if (mounted) {
-        setState(() => _error = 'Something went wrong. Please try again.');
+        setState(
+          () => _error = 'Could not reach the server. Check your internet connection and try again.',
+        );
       }
     } finally {
       if (mounted) setState(() => _loading = false);

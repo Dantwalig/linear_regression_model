@@ -56,7 +56,7 @@ app = FastAPI(
 )
 
 ALLOWED_ORIGINS = [
-    "https://YOUR-SERVICE.onrender.com",
+    "https://anaemia-risk-api.onrender.com",
     "http://localhost:5000",
     "http://127.0.0.1:5000",
 ]
