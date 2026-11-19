@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sklearn.base import clone
 from sklearn.linear_model import SGDRegressor
@@ -112,6 +113,10 @@ def predict_one_row(row_df: pd.DataFrame) -> float:
     """Same idea as the notebook function, but using the model loaded at startup."""
     return float(state["model"].predict(row_df)[0])
 
+@app.get("/", include_in_schema=False)
+def root():
+    # Send anyone who opens the bare address to the Swagger page
+    return RedirectResponse(url="/docs")
 
 @app.post("/predict")
 def predict(payload: PatientInput):
