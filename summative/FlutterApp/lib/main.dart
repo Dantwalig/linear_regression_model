@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 // Public address of the deployed API on Render (no slash at the end)
-const String apiBaseUrl = 'https://YOUR-SERVICE.onrender.com';
+const String apiBaseUrl = 'https://anaemia-risk-api.onrender.com';
 
 void main() => runApp(const AnaemiaApp());
 
