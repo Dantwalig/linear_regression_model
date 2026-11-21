@@ -19,3 +19,8 @@ dependencies = [
 dev = [
     "ipykernel>=7.4.0",
 ]
+
+[tool.uv.workspace]
+members = [
+    "API",
+]
