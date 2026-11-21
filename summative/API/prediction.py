@@ -1,50 +1,27 @@
-import io
+"""Bedside Anaemia Risk Estimator API: predicts haemoglobin (g/dL) from bedside signs."""
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import joblib
-import numpy as np
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sklearn.base import clone
-from sklearn.linear_model import SGDRegressor
+
+from retrain import FEATURES, prepare_new_rows, read_uploaded_csv, retrain
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "best_model.pkl"
 TRAIN_PATH = BASE_DIR / "training_data.csv"
 
-FEATURES = [
-    "sex", "temp_gradient", "pallor", "indrawing", "resp_deep", "age_months",
-    "fever_high", "waz_low", "tachyc", "refill3", "pulse_vol_weak", "shock",
-    "mal_par", "muac2", "dehydration", "oxysat_cat", "jaundice", "coma",
-]
-
-yes_values = {"yes", "y", "Yes"}
-no_values = {"no", "n", "No"}
-binary_cols = ["temp_gradient", "pallor", "indrawing", "resp_deep", "fever_high",
-               "tachyc", "refill3", "pulse_vol_weak", "shock", "mal_par",
-               "dehydration", "jaundice", "coma"]
-
-
-def clean_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    out = raw.copy()
-    for c in binary_cols:
-        out[c] = out[c].map(lambda v: 1 if v in yes_values else (0 if v in no_values else np.nan))
-    out["sex"] = out["sex"].map({"male": 1, "female": 0})
-    out["muac2"] = out["muac2"].map({"muac<=11.5cm": 1, "muac>11.5cm": 0})
-    out["oxysat_cat"] = out["oxysat_cat"].map({"Oxysat<90%": 1, "Oxysat>90%": 0})
-    out["age_months"] = pd.to_numeric(out["age_months"], errors="coerce")
-    out["hb"] = pd.to_numeric(out["hb"], errors="coerce")
-    return out
+# The live model and training data live here so /retrain can swap them without a redeploy
 state = {"model": None, "train_data": None}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load the model from the repo at startup
+    # Load the model from the repository at startup
     state["model"] = joblib.load(MODEL_PATH)
     state["train_data"] = pd.read_csv(TRAIN_PATH)
     yield
@@ -56,6 +33,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: I allow only the exact browser origins that need this API (the deployed Render
+# address and the local Flutter web debug address), only the GET and POST methods the API
+# uses, and only the Content-Type and Accept headers. Credentials are off because the API
+# uses no cookies or logins. I do not use "*" so a random website cannot call the API from
+# a visitor's browser. The mobile app is not a browser, so CORS does not apply to it.
 ALLOWED_ORIGINS = [
     "https://anaemia-risk-api.onrender.com",
     "http://localhost:5000",
@@ -113,61 +95,35 @@ def predict_one_row(row_df: pd.DataFrame) -> float:
     """Same idea as the notebook function, but using the model loaded at startup."""
     return float(state["model"].predict(row_df)[0])
 
+
 @app.get("/", include_in_schema=False)
 def root():
     # Send anyone who opens the bare address to the Swagger page
     return RedirectResponse(url="/docs")
+
 
 @app.post("/predict")
 def predict(payload: PatientInput):
     row = pd.DataFrame([payload.model_dump()])[FEATURES]   # keep the training column order
     return {"predicted_hb": round(predict_one_row(row), 2), "unit": "g/dL"}
 
+
 @app.post("/retrain")
-async def retrain(file: UploadFile = File(...)):
+async def retrain_endpoint(file: UploadFile = File(...)):
     content = await file.read()
+    try:
+        new_rows = prepare_new_rows(read_uploaded_csv(content))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
-    # The original file is tab separated, so try tabs first, then commas
-    raw = None
-    for sep in ("\t", ","):
-        try:
-            candidate = pd.read_csv(io.BytesIO(content), sep=sep)
-        except Exception:
-            continue
-        if "hb" in candidate.columns:
-            raw = candidate
-            break
-    if raw is None:
-        raise HTTPException(status_code=400, detail="Could not read a CSV with an 'hb' column.")
+    # Uploading the file is the only step: retrain, then start using the new model
+    updated_model, updated_data = retrain(state["model"], state["train_data"], new_rows)
+    state["model"] = updated_model
+    state["train_data"] = updated_data
+    joblib.dump(updated_model, MODEL_PATH)   # lost if the free Render service restarts
 
-    missing = [c for c in FEATURES + ["hb"] if c not in raw.columns]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Missing columns: {missing}")
-
-    new = clean_raw(raw)[FEATURES + ["hb"]].dropna(subset=["hb"])
-    if new.empty:
-        raise HTTPException(status_code=400, detail="No usable rows with an hb value.")
-
-    pipeline = state["model"]
-    estimator = pipeline.named_steps["model"]
-
-    if isinstance(estimator, SGDRegressor):
-        # Continue training the saved model on the new rows only
-        X_new = pipeline.named_steps["scaler"].transform(
-            pipeline.named_steps["imputer"].transform(new[FEATURES]))
-        estimator.partial_fit(X_new, new["hb"])
-        updated = pipeline
-    else:
-        # Any other model: refit on the original data plus the new rows
-        combined = pd.concat([state["train_data"], new], ignore_index=True)
-        updated = clone(pipeline)
-        updated.fit(combined[FEATURES], combined["hb"])
-        state["train_data"] = combined
-
-    state["model"] = updated            # /predict now uses the new model, no redeploy
-    joblib.dump(updated, MODEL_PATH)    # lost if the free Render service restarts
     return {
         "message": "Model retrained",
-        "rows_added": int(len(new)),
-        "training_rows": int(len(state["train_data"])),
+        "rows_added": int(len(new_rows)),
+        "training_rows": int(len(updated_data)),
     }
